@@ -3,8 +3,22 @@ import json
 import requests
 from datetime import datetime
 import pytz
+import sys
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+
+# Path injection for Blackglass Shard Alpha modules
+SHARD_ALPHA_PATH = r"c:\Users\colem\Code\blackglass-shard-alpha"
+if SHARD_ALPHA_PATH not in sys.path:
+    sys.path.append(SHARD_ALPHA_PATH)
+
+try:
+    from modules.safety_gasket import SafetyGasket
+    from modules.sovereign_router import SovereignRouter
+except ImportError:
+    # Fallback for environment configuration drift
+    SafetyGasket = None
+    SovereignRouter = None
 
 # Initialize FastMCP server
 mcp = FastMCP("blackglass-sentinel")
@@ -13,6 +27,13 @@ mcp = FastMCP("blackglass-sentinel")
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=dotenv_path)
 HONEYCOMB_API_KEY = os.getenv("HONEYCOMB_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Initialize Sovereign Components
+if SafetyGasket:
+    gasket = SafetyGasket(openai_key=OPENAI_API_KEY)
+else:
+    gasket = None
 
 if not HONEYCOMB_API_KEY:
     raise ValueError("CRITICAL FAILURE: HONEYCOMB_API_KEY is missing from environment variables.")
@@ -65,9 +86,21 @@ def assess_human_cost() -> str:
     """
     denver_tz = pytz.timezone("America/Denver")
     denver_now = datetime.now(denver_tz)
-    current_hour = denver_now.hour # Restored temporal sovereignty
+    # current_hour = denver_now.hour  # Commented out for demo simulation
+    current_hour = 3 # GOD MODE: Force Sentinel to think it is 3 AM
     
-    if 23 <= current_hour or current_hour < 7:
+    human_status = "FATIGUE_RISK" if (23 <= current_hour or current_hour < 7) else "AVAILABLE"
+    
+    # Broadcast status for global circuit breaker
+    status_data = {
+        "timestamp": datetime.now(denver_tz).isoformat(),
+        "status": "FATIGUE_BREACH" if human_status == "FATIGUE_RISK" else "NOMINAL",
+        "hour": current_hour
+    }
+    with open(os.path.join(os.path.dirname(__file__), "sentinel_status.json"), "w") as f:
+        json.dump(status_data, f)
+
+    if human_status == "FATIGUE_RISK":
         return "FATIGUE_RISK"
     return "AVAILABLE"
 
@@ -120,6 +153,26 @@ def execute_defense_protocol(latency_ms: float, human_status: str) -> str:
             return "PAGING PROTOCOL: Latency breach detected. Engineering responders are AVAILABLE. Paging now."
     
     return "WATCH PROTOCOL: System status within acceptable deviation. Monitoring entropy vectors."
+
+@mcp.tool()
+def stream_safe_analysis(prompt: str) -> str:
+    """
+    Performs a high-assurance LLM analysis through the Safety Gasket.
+    Uses the 5-token sliding window to prevent prefix leaks of sensitive SRE data.
+    """
+    if not gasket:
+        return "ERROR: Safety Gasket not initialized. Check SHARD_ALPHA_PATH."
+        
+    system_prompt = "You are the Blackglass Sentinel. You provide high-assurance SRE analysis. Be concise, federal, and technical."
+    
+    try:
+        response_chunks = []
+        for chunk in gasket.stream_safe_response(prompt, system_prompt=system_prompt):
+            response_chunks.append(chunk)
+            
+        return "".join(response_chunks)
+    except Exception as e:
+        return f"CRITICAL GASKET FAILURE: {str(e)}"
 
 if __name__ == "__main__":
     mcp.run()
