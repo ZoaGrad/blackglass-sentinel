@@ -1,9 +1,11 @@
+import logging
 import os
 import json
-import requests
-from datetime import datetime
-import pytz
 import sys
+from datetime import datetime
+from typing import Optional
+
+import pytz
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 
@@ -12,13 +14,27 @@ SHARD_ALPHA_PATH = r"c:\Users\colem\Code\blackglass-shard-alpha"
 if SHARD_ALPHA_PATH not in sys.path:
     sys.path.append(SHARD_ALPHA_PATH)
 
+# Path injection for Variance Core adapters
+VARIANCE_CORE_PATH = r"c:\Users\colem\Code\blackglass-variance-core\src"
+if VARIANCE_CORE_PATH not in sys.path:
+    sys.path.append(VARIANCE_CORE_PATH)
+
 try:
     from modules.safety_gasket import SafetyGasket
     from modules.sovereign_router import SovereignRouter
 except ImportError:
-    # Fallback for environment configuration drift
     SafetyGasket = None
     SovereignRouter = None
+
+try:
+    from adapters.telemetry.air_node import AirNodeTelemetryAdapter
+    _AIR_ADAPTER_AVAILABLE = True
+except ImportError:
+    AirNodeTelemetryAdapter = None
+    _AIR_ADAPTER_AVAILABLE = False
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("blackglass-sentinel")
 
 # Initialize FastMCP server
 mcp = FastMCP("blackglass-sentinel")
@@ -27,7 +43,11 @@ mcp = FastMCP("blackglass-sentinel")
 dotenv_path = os.path.join(os.path.dirname(__file__), ".env")
 load_dotenv(dotenv_path=dotenv_path)
 HONEYCOMB_API_KEY = os.getenv("HONEYCOMB_API_KEY")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_API_KEY    = os.getenv("OPENAI_API_KEY")
+
+# Constitutional thresholds (mirrors constitution.py — kept local to avoid cross-repo import)
+_CRITICAL_LATENCY_MS:  float = 5000.0  # 5.0s → MERCY PROTOCOL (physics death)
+_CRITICAL_VARIANCE_CAP: float = 0.5    # 0.5V  → MERCY PROTOCOL (semantic collapse)
 
 # Initialize Sovereign Components
 if SafetyGasket:
@@ -84,18 +104,31 @@ def assess_human_cost() -> str:
     Evaluates engineer fatigue risk based on Denver local time.
     Logic: 23:00 - 07:00 is FATIGUE_RISK.
     """
-    denver_tz = pytz.timezone("America/Denver")
+    denver_tz  = pytz.timezone("America/Denver")
     denver_now = datetime.now(denver_tz)
-    # current_hour = denver_now.hour  # Commented out for demo simulation
-    current_hour = 3 # GOD MODE: Force Sentinel to think it is 3 AM
-    
-    human_status = "FATIGUE_RISK" if (23 <= current_hour or current_hour < 7) else "AVAILABLE"
-    
+
+    # CM-6: No magic numbers. GOD_MODE is an explicit, audit-logged env override.
+    god_mode = os.getenv("SENTINEL_GOD_MODE", "false").lower() == "true"
+    god_hour  = int(os.getenv("SENTINEL_GOD_HOUR", "3"))
+
+    if god_mode:
+        current_hour = god_hour
+        logger.warning(
+            "GOD_MODE_ACTIVE: Time artificially locked to hour %s — "
+            "disable SENTINEL_GOD_MODE before federal deployment.",
+            god_hour,
+        )
+    else:
+        current_hour = denver_now.hour
+
+    human_status = "FATIGUE_RISK" if (current_hour >= 23 or current_hour < 7) else "AVAILABLE"
+
     # Broadcast status for global circuit breaker
     status_data = {
-        "timestamp": datetime.now(denver_tz).isoformat(),
+        "timestamp": denver_now.isoformat(),
         "status": "FATIGUE_BREACH" if human_status == "FATIGUE_RISK" else "NOMINAL",
-        "hour": current_hour
+        "hour": current_hour,
+        "god_mode": god_mode,
     }
     with open(os.path.join(os.path.dirname(__file__), "sentinel_status.json"), "w") as f:
         json.dump(status_data, f)
@@ -137,22 +170,102 @@ def active_ui_interdiction(interdiction_type: str) -> str:
     return f"UNKNOWN INTERDICTION TYPE: {interdiction_type}"
 
 @mcp.tool()
-def execute_defense_protocol(latency_ms: float, human_status: str) -> str:
+def get_vault_variance() -> dict:
     """
-    Sovereign reliability decision logic.
-    IF latency > 500 and human is at risk -> MERCY PROTOCOL (Auto-Rollback + Interdiction).
-    IF latency > 500 and human is available -> PAGING PROTOCOL.
-    ELSE -> WATCH PROTOCOL.
+    Pulls live V(t) from the A.I.R. VaultNode via the authenticated
+    AirNodeTelemetryAdapter. Returns variance score, incident count,
+    and a NOMINAL/INTERDICT status tag for Claude's context window.
+
+    Requires AIR_NODE_URL and AIR_NODE_API_KEY in .env.
     """
-    if latency_ms > 500:
+    if not _AIR_ADAPTER_AVAILABLE:
+        return {
+            "status": "error",
+            "message": "AirNodeTelemetryAdapter unavailable — check VARIANCE_CORE_PATH.",
+        }
+
+    try:
+        adapter = AirNodeTelemetryAdapter()
+        result  = adapter.get_window()
+    except Exception as exc:
+        logger.exception("get_vault_variance: adapter error")
+        return {"status": "error", "message": str(exc)}
+
+    if result.get("status") != "ok":
+        return result
+
+    v          = result["variance_detected"]
+    incidents  = result.get("features", {}).get("incident_count", "?")
+    window_sec = result.get("features", {}).get("window_sec", "?")
+
+    interdict = v >= _CRITICAL_VARIANCE_CAP
+    tag       = "INTERDICT_DRIFT" if interdict else "NOMINAL"
+
+    logger.info("Vault variance V(t)=%.4f incidents=%s status=%s", v, incidents, tag)
+
+    return {
+        "status":         "ok",
+        "variance":       v,
+        "verdict":        tag,
+        "incident_count": incidents,
+        "window_sec":     window_sec,
+        "raw":            result,
+    }
+
+
+@mcp.tool()
+def execute_defense_protocol(
+    latency_ms:   float,
+    human_status: str,
+    variance:     Optional[float] = None,
+) -> str:
+    """
+    Dual-channel sovereign reliability decision logic.
+
+    Trigger channels (either alone fires MERCY PROTOCOL):
+      - Physics channel:   latency_ms > CRITICAL_LATENCY_CAP (5000ms)
+      - Semantic channel:  variance   > CRITICAL_VARIANCE_CAP (0.5V)
+
+    If human is at FATIGUE_RISK during any breach → MERCY PROTOCOL.
+    If human is AVAILABLE during a breach → PAGING PROTOCOL.
+    Both channels clean → WATCH PROTOCOL.
+
+    Pass variance from get_vault_variance()["variance"] for full sovereignty.
+    Omit variance (or pass None) to run on latency signal only.
+    """
+    latency_breach  = latency_ms > _CRITICAL_LATENCY_MS
+    variance_breach = (variance is not None) and (variance > _CRITICAL_VARIANCE_CAP)
+    any_breach      = latency_breach or variance_breach
+
+    # Build a diagnostic tag for the response
+    breach_sources = []
+    if latency_breach:
+        breach_sources.append(f"LATENCY={latency_ms:.0f}ms>{_CRITICAL_LATENCY_MS:.0f}ms")
+    if variance_breach:
+        breach_sources.append(f"V(t)={variance:.4f}>{_CRITICAL_VARIANCE_CAP}")
+    breach_tag = " | ".join(breach_sources) if breach_sources else "NONE"
+
+    if any_breach:
+        logger.warning(
+            "Breach detected: %s | human_status=%s", breach_tag, human_status
+        )
         if human_status == "FATIGUE_RISK":
-            # Automatically trigger a UI notification as part of the Mercy Protocol
             interdiction_result = active_ui_interdiction("NOTIFY_RESPONDER")
-            return f"MERCY PROTOCOL ACTIVATED: Latency breach during high fatigue risk. Auto-Rollback triggered. DO NOT PAGE ENGINEERS. {interdiction_result}"
-        elif human_status == "AVAILABLE":
-            return "PAGING PROTOCOL: Latency breach detected. Engineering responders are AVAILABLE. Paging now."
-    
-    return "WATCH PROTOCOL: System status within acceptable deviation. Monitoring entropy vectors."
+            return (
+                f"MERCY PROTOCOL ACTIVATED: Breach [{breach_tag}] during FATIGUE_RISK. "
+                f"Auto-Rollback initiated. DO NOT PAGE ENGINEERS. {interdiction_result}"
+            )
+        else:
+            return (
+                f"PAGING PROTOCOL: Breach [{breach_tag}] detected. "
+                "Engineering responders AVAILABLE. Paging now."
+            )
+
+    return (
+        f"WATCH PROTOCOL: All channels nominal "
+        f"(latency={latency_ms:.0f}ms, V(t)={variance if variance is not None else 'N/A'}). "
+        "Monitoring entropy vectors."
+    )
 
 @mcp.tool()
 def stream_safe_analysis(prompt: str) -> str:
