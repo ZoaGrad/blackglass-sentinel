@@ -1,0 +1,14 @@
+{
+  "state_hash": "0e991a0e618d704dbb0dd6f04aeebd25bf1bbc8db7b91841bf5f878058f8c161",
+  "seeded_at": "2026-03-29T14:22:49.115430+00:00",
+  "seeded_by": "17TJ5",
+  "source": "blackglass-sentinel constitutional anchors",
+  "state_snapshot": {
+    "system": "blackglass-sentinel",
+    "node": "EAST [Mind/Radiance]",
+    "genesis_baseline": "2026-03-14",
+    "standard": "0.05V",
+    "cage_id": "17TJ5",
+    "seeded_at": "2026-03-29"
+  }
+}
