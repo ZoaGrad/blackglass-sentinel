@@ -17,6 +17,8 @@ Sentinel is not just a bot; it is a sovereign agent for the engineer's well-bein
 - **Entropy Vector Scanning**: High-cardinality analysis of Honeycomb telemetry to identify user-specific impact.
 - **Human Cost Assessment**: Real-time evaluation of responder availability based on localized fatigue data.
 - **Automated Defense Protocols**: Deterministic orchestration of system responses (Paging, Rolling back, or Watching).
+- **Signed God Mode Overrides**: Time-bounded HMAC-backed operator overrides replace the retired raw env-var bypass.
+- **Local Runtime Status Snapshot**: `sentinel_status.json` is emitted as local runtime state for the active workstation and should not be treated as canonical evidence.
 
 ---
 *Built for Blackglass Continuum.*
